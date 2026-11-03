@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>Swing Lab</title>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Swing Lab">
+<meta name="theme-color" content="#0b0f0d">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<style>
+:root{--bg:#0b0f0d;--card:#151b18;--line:#26302b;--txt:#eef3f0;--mut:#93a39a;--acc:#3ddc84;--warn:#f5b941;--bad:#ff5d5d;--blue:#5aa9ff}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;background:var(--bg);color:var(--txt);font:16px/1.4 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;height:100%;overscroll-behavior:none}
+button{font:inherit;color:inherit;border:0;background:var(--card);border-radius:14px;padding:14px 16px;cursor:pointer}
+button.pri{background:var(--acc);color:#04210f;font-weight:700}
+button.ghost{background:transparent;border:1px solid var(--line)}
+button:disabled{opacity:.4}
+input,select{font:inherit;color:var(--txt);background:#0f1412;border:1px solid var(--line);border-radius:10px;padding:10px 12px;width:100%}
+label{display:block;color:var(--mut);font-size:13px;margin:12px 0 6px}
+.screen{display:none;min-height:100%;padding:calc(env(safe-area-inset-top) + 16px) 16px calc(env(safe-area-inset-bottom) + 24px)}
+.screen.on{display:block}
+h1{font-size:30px;margin:8px 0 2px;letter-spacing:-.5px}
+h2{font-size:20px;margin:22px 0 10px}
+.sub{color:var(--mut);margin:0 0 18px}
+.stack{display:grid;gap:10px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px 16px}
+.tips li{margin:4px 0;color:#cfd9d3}
+.tips{padding-left:20px;margin:6px 0 0}
+details summary{cursor:pointer;color:var(--mut);padding:6px 0}
+.row{display:flex;gap:10px;align-items:center}
+.row>*{flex:1}
+.top{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.top h2{margin:0;flex:1}
+.back{padding:10px 14px}
+/* session */
+#session{padding:0;position:fixed;inset:0;background:#000}
+#session.on{display:block}
+#vwrap{position:absolute;inset:0}
+#video,#overlay{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
+#status{position:absolute;left:50%;transform:translateX(-50%);top:calc(env(safe-area-inset-top) + 12px);background:rgba(0,0,0,.65);backdrop-filter:blur(8px);padding:10px 16px;border-radius:999px;font-weight:600;white-space:nowrap;max-width:92vw;overflow:hidden;text-overflow:ellipsis;border:2px solid var(--line)}
+#status.ok{border-color:var(--acc)} #status.warn{border-color:var(--warn)} #status.bad{border-color:var(--bad)} #status.go{background:var(--acc);color:#04210f;border-color:var(--acc)}
+#hud{position:absolute;left:0;right:0;bottom:0;padding:12px 14px calc(env(safe-area-inset-bottom) + 14px);display:flex;gap:10px;align-items:center;background:linear-gradient(transparent,rgba(0,0,0,.75))}
+#hud .count{flex:1;font-weight:700;font-size:18px}
+#hud .count small{display:block;font-weight:400;color:var(--mut);font-size:12px}
+#toast{position:absolute;left:50%;top:45%;transform:translate(-50%,-50%) scale(.9);background:rgba(61,220,132,.95);color:#04210f;padding:18px 24px;border-radius:18px;font-weight:800;font-size:22px;opacity:0;transition:.25s;pointer-events:none;text-align:center}
+#toast.show{opacity:1;transform:translate(-50%,-50%) scale(1)}
+#loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px;color:var(--mut);background:#000}
+.spin{width:36px;height:36px;border:3px solid var(--line);border-top-color:var(--acc);border-radius:50%;animation:s 1s linear infinite}@keyframes s{to{transform:rotate(360deg)}}
+/* results */
+table{width:100%;border-collapse:collapse;font-size:14px}
+td,th{padding:8px 6px;white-space:nowrap;border-bottom:1px solid var(--line);text-align:right;vertical-align:top}
+td:first-child,th:first-child{text-align:left;white-space:normal}
+th{color:var(--mut);font-weight:500;font-size:12px}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:1px;background:var(--line)}
+.dot.good{background:var(--acc)}.dot.warn{background:var(--warn)}.dot.bad{background:var(--bad)}
+.hint{color:var(--mut);font-size:12px}
+.swings{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.sw{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:0;overflow:hidden;text-align:left;position:relative}
+.sw img{width:100%;aspect-ratio:9/16;object-fit:cover;display:block;background:#000}
+.sw div{padding:6px 8px;font-size:12px}
+.sw b{font-size:14px}
+.sw.ref{border-color:var(--blue)}
+.ai{white-space:normal}
+.ai h3{font-size:16px;margin:14px 0 6px}.ai p{margin:6px 0}.ai ul{padding-left:20px;margin:6px 0}
+/* detail */
+#player{width:100%;max-height:62vh;background:#000;border-radius:14px;display:block;object-fit:contain}
+.chips{display:flex;gap:6px;overflow-x:auto;padding:8px 0}
+.chips button{padding:8px 12px;border-radius:999px;font-size:13px;flex:none}
+.chips button.on{background:var(--acc);color:#04210f}
+input[type=range]{padding:0;border:0;background:none}
+.kf{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+.kf figure{margin:0;background:#000;border-radius:10px;overflow:hidden;position:relative}
+.kf canvas{width:100%;display:block}
+.kf figcaption{position:absolute;left:6px;top:6px;background:rgba(0,0,0,.6);padding:2px 8px;border-radius:8px;font-size:12px}
+.err{color:var(--bad)}
+.progress{height:6px;background:var(--line);border-radius:3px;overflow:hidden;margin-top:10px}.progress i{display:block;height:100%;background:var(--acc);width:0}
+</style>
+</head>
+<body>
+
+<!-- HOME -->
+<section id="home" class="screen on">
+  <h1>⛳ Swing Lab</h1>
+  <p class="sub">Schwunganalyse mit der iPhone-Kamera</p>
+  <div class="stack">
+    <button class="pri" id="btnStart">▶︎ Neue Session starten</button>
+    <button id="btnResults" style="display:none">📊 Ergebnisse ansehen</button>
+    <button class="ghost" id="btnImport">🎞 Eigenes Video importieren (z. B. Zeitlupe)</button>
+    <button class="ghost" id="btnRef">⭐️ Referenz-Schwung laden (Pro-Clip)</button>
+    <input type="file" id="fileImport" accept="video/*" hidden>
+    <input type="file" id="fileRef" accept="video/*" hidden>
+    <div id="importBox" class="card" style="display:none"><div id="importMsg">Verarbeite Video …</div><div class="progress"><i id="importBar"></i></div></div>
+  </div>
+
+  <h2>Aufbau</h2>
+  <div class="card">
+    <b>Down-the-Line</b> – Kamera hinter dir, Blick Richtung Ziel.
+    <ul class="tips">
+      <li>Handy hochkant aufs Stativ, Linse etwa auf Hüfthöhe</li>
+      <li>2–3 m hinter dir, auf der Linie Hände → Ziel</li>
+      <li>Ganzer Körper im Bild, Platz über dem Kopf für den Schläger</li>
+      <li>Ruhiger Hintergrund, kein Gegenlicht</li>
+    </ul>
+  </div>
+
+  <details class="card" style="margin-top:12px">
+    <summary>⚙️ Einstellungen</summary>
+    <label>Körpergröße (cm) – für cm-Angaben</label>
+    <input id="setHeight" type="number" inputmode="numeric" value="180">
+    <label>Kamera</label>
+    <select id="setCam"><option value="main">Hauptkamera (1×)</option><option value="ultra">Ultraweitwinkel (0,5×) – wenn wenig Platz</option></select>
+    <label>Pose-Modell</label>
+    <select id="setModel"><option value="full">Genau (empfohlen)</option><option value="lite">Schnell</option><option value="heavy">Sehr genau (langsam)</option></select>
+    <label>Claude API-Key (bleibt nur auf diesem Gerät)</label>
+    <input id="setKey" type="password" placeholder="sk-ant-…" autocomplete="off">
+    <label>Claude-Modell</label>
+    <input id="setClaude" value="claude-sonnet-5-5">
+    <p class="hint">Ohne Key funktionieren Messung und Vergleich trotzdem, nur der KI-Coach nicht.</p>
+  </details>
+  <p class="hint" style="margin-top:18px">Daten bleiben im Speicher, bis du die App schließt. Nichts wird hochgeladen außer der KI-Anfrage an Claude.</p>
+</section>
+
+<!-- SESSION -->
+<section id="session" class="screen">
+  <div id="vwrap">
+    <video id="video" playsinline muted autoplay></video>
+    <canvas id="overlay"></canvas>
+  </div>
+  <div id="loading"><div class="spin"></div><div id="loadMsg">Lade Pose-Erkennung …</div></div>
+  <div id="status">Starte Kamera …</div>
+  <div id="toast"></div>
+  <div id="hud">
+    <div class="count"><span id="swCount">0 Schwünge</span><small id="fps"></small></div>
+    <button class="ghost" id="btnStop" style="background:rgba(0,0,0,.5)">✕</button>
+    <button class="pri" id="btnAnalyze">Analyse ▸</button>
+  </div>
+</section>
+
+<!-- RESULTS -->
+<section id="results" class="screen">
+  <div class="top"><button class="back" id="resBack">‹</button><h2>Session-Analyse</h2><button class="pri back" id="resCam">📷</button></div>
+  <div id="resEmpty" class="card" style="display:none">Noch keine Schwünge erfasst.</div>
+  <div id="resBody">
+    <div class="card"><table id="sumTable"></table>
+      <p class="hint">Grün = im Richtwert-Korridor, gelb = knapp daneben, rot = deutlich daneben. „Schätzung“ = 3D-Wert aus einer einzigen Kamera, nur grob.</p></div>
+    <h2>🤖 KI-Coach</h2>
+    <button class="pri" id="btnAI" style="width:100%">Analyse von Claude holen</button>
+    <div id="aiOut" class="card ai" style="display:none;margin-top:10px"></div>
+    <h2>Schwünge</h2>
+    <div class="swings" id="swList"></div>
+  </div>
+</section>
+
+<!-- DETAIL -->
+<section id="detail" class="screen">
+  <div class="top"><button class="back" id="detBack">‹</button><h2 id="detTitle">Schwung</h2><button class="ghost back" id="detDel">🗑</button></div>
+  <canvas id="player"></canvas>
+  <div class="row" style="margin-top:8px">
+    <button id="plPlay" style="flex:0 0 64px">▶︎</button>
+    <input type="range" id="plSeek" min="0" max="100" value="0">
+    <select id="plSpeed" style="flex:0 0 84px"><option value="0.25">¼×</option><option value="0.5" selected>½×</option><option value="1">1×</option></select>
+  </div>
+  <div class="chips" id="pChips"></div>
+  <h2>Positionen <span class="hint" id="kfHint"></span></h2>
+  <div class="kf" id="kfGrid"></div>
+  <h2>Kennzahlen</h2>
+  <div class="card"><table id="detTable"></table></div>
+</section>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
