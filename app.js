@@ -19,12 +19,12 @@ const S = {
   get(k, d) { try { return localStorage.getItem('sl_' + k) ?? d; } catch { return d; } },
   set(k, v) { try { localStorage.setItem('sl_' + k, v); } catch {} },
 };
-const settingFields = { setHeight: ['height', '180'], setCam: ['cam', 'main'], setModel: ['model', 'full'], setKey: ['key', ''], setClaude: ['claude', 'claude-sonnet-5-5'] };
+const settingFields = { setHeight: ['height', '193'], setCam: ['cam', 'main'], setModel: ['model', 'full'], setKey: ['key', ''], setClaude: ['claude', 'claude-sonnet-5-5'] };
 for (const [id, [k, d]] of Object.entries(settingFields)) {
   $(id).value = S.get(k, d);
   $(id).addEventListener('change', () => S.set(k, $(id).value.trim()));
 }
-const heightCm = () => Number($('setHeight').value) || 180;
+const heightCm = () => Number($('setHeight').value) || 193;
 
 function show(id) {
   document.querySelectorAll('.screen').forEach((s) => s.classList.toggle('on', s.id === id));
