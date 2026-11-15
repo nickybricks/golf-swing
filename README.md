@@ -17,6 +17,6 @@ Golf-Schwunganalyse als Web-App (PWA) fürs iPhone, ohne App Store.
 **Hinweise**
 - 2D-Messung aus einer Kamera: Die Werte eignen sich für Trends und Vergleiche, sie sind keine Labormessung. Die Werte mit „Schätzung“ sind besonders grob.
 - Die Richtwerte sind grobe Orientierungswerte aus Lehrliteratur und Studien zu Tour-Spielern (u. a. GolfTEC SwingTRU).
-- Daten bleiben im Speicher, bis die App geschlossen wird.
+- Schwünge werden lokal auf dem Gerät gespeichert (IndexedDB) und bleiben nach dem Schließen erhalten.
 
 Dateien: `index.html` (UI), `app.js` (Kamera, Pose, Session, KI), `analysis.js` (Phasenerkennung und Kennzahlen).
