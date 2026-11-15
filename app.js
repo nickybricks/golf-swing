@@ -529,17 +529,76 @@ Bitte analysiere wie ein erfahrener Golflehrer auf Deutsch, knapp und konkret:
 ${state.ref ? '### Größte Unterschiede zur Referenz\n' : ''}### Konstanz über die Session (Streuung der Werte)
 Weise darauf hin, wenn ein Wert wahrscheinlich ein Messfehler ist (z. B. Hände verdeckt, Schätzwerte). Keine Einleitung.` });
 
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-      body: JSON.stringify({ model: $('setClaude').value.trim() || 'claude-sonnet-5-5', max_tokens: 2000, messages: [{ role: 'user', content }] }),
-    });
-    const j = await resp.json();
-    if (!resp.ok) throw new Error(j.error?.message || resp.status);
-    out.innerHTML = md(j.content.filter((c) => c.type === 'text').map((c) => c.text).join('\n'));
+    const model = $('setClaude').value.trim() || 'claude-sonnet-5-5';
+    // Server-side fallback if a safety classifier declines (only models that support it)
+    const canFallback = /^claude-(sonnet-5-5|opus-5|fable-5)/.test(model);
+    const headers = { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' };
+    if (canFallback) headers['anthropic-beta'] = 'server-side-fallback-2026-07-01';
+    const body = {
+      model,
+      // Thinking counts against max_tokens – 2000 was used up by thinking, so the answer got cut off or stayed empty.
+      max_tokens: 16000,
+      output_config: { effort: 'medium' },
+      stream: true,
+      messages: [{ role: 'user', content }],
+    };
+    if (canFallback) body.fallbacks = 'default';
+    await streamAI(headers, body, out);
   } catch (e) {
-    out.innerHTML = `<span class="err">Fehler: ${e.message || e}</span>`;
-  } finally { $('btnAI').disabled = false; }
+    out.querySelector('.spin')?.parentElement.remove();
+    out.insertAdjacentHTML('beforeend', `<p class="err">Fehler: ${esc(String(e.message || e))}</p>`);
+  } finally {
+    $('btnAI').disabled = false;
+    if (!sess.running) { try { await wake?.release(); } catch {} wake = null; }
+  }
+}
+
+const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+
+// Streaming (SSE) so long answers neither time out nor seem to hang; text appears as it is written.
+async function streamAI(headers, body, out) {
+  keepAwake(); // display lock would kill the request on iOS
+  const setStatus = (msg) => { out.innerHTML = `<div class="row"><div class="spin" style="flex:none"></div><div>${msg}</div></div>`; };
+  setStatus('Claude schaut sich deine Schwünge an …');
+  const resp = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers, body: JSON.stringify(body) });
+  if (!resp.ok) {
+    let msg = `HTTP ${resp.status}`;
+    try { const j = await resp.json(); msg = j.error?.message || msg; } catch {}
+    if (resp.status === 401) msg += ' – API-Key prüfen.';
+    if (resp.status === 404) msg += ' – Modellname in den Einstellungen prüfen.';
+    if (resp.status === 429 || resp.status === 529) msg += ' – API überlastet/Limit erreicht, bitte gleich nochmal versuchen.';
+    throw new Error(msg);
+  }
+  const reader = resp.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '', text = '', stop = null, gotText = false;
+  const render = () => { out.innerHTML = md(text); };
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf('\n\n')) >= 0) {
+        const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
+        const data = chunk.split('\n').filter((l) => l.startsWith('data:')).map((l) => l.slice(5).trim()).join('');
+        if (!data) continue;
+        let ev; try { ev = JSON.parse(data); } catch { continue; }
+        if (ev.type === 'content_block_start' && ev.content_block?.type === 'thinking' && !gotText) setStatus('Claude denkt nach …');
+        else if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta') { text += ev.delta.text; gotText = true; render(); }
+        else if (ev.type === 'message_delta' && ev.delta?.stop_reason) stop = ev.delta.stop_reason;
+        else if (ev.type === 'error') throw new Error(ev.error?.message || 'Stream-Fehler');
+      }
+    }
+  } catch (e) {
+    if (gotText) render();
+    throw new Error(`Verbindung abgebrochen (${e.message || e}). ${gotText ? 'Teilantwort oben.' : ''} App beim Warten bitte im Vordergrund lassen.`);
+  }
+  if (!gotText && stop !== 'refusal') out.innerHTML = '';
+  if (stop === 'max_tokens') out.insertAdjacentHTML('beforeend', '<p class="err">Antwort wurde wegen Längenlimit abgeschnitten.</p>');
+  else if (stop === 'refusal') out.insertAdjacentHTML('beforeend', '<p class="err">Claude hat die Anfrage abgelehnt (Sicherheitsfilter). Bitte nochmal versuchen.</p>');
+  else if (!stop) out.insertAdjacentHTML('beforeend', '<p class="err">Stream endete unerwartet – Antwort evtl. unvollständig.</p>');
+  else if (!gotText) out.innerHTML = '<p class="err">Leere Antwort erhalten.</p>';
 }
 
 function md(t) {
