@@ -12,7 +12,7 @@ const P_KEYS = ['P1','P3','P4','P6','P7','P10'];
 const THUMB_LONG = 480;
 
 const $ = (id) => document.getElementById(id);
-const state = { swings: [], ref: null, landmarker: null, landmarkerModel: null, lastTs: 0, current: null };
+const state = { all: [], session: null, swings: [], ref: null, landmarker: null, landmarkerModel: null, lastTs: 0, current: null };
 
 // ---------- settings ----------
 const S = {
@@ -124,7 +124,66 @@ function setStatus(t, cls = '') { const el = $('status'); el.textContent = t; el
 function updateCount() {
   const n = state.swings.length;
   $('swCount').textContent = `${n} ${n === 1 ? 'Schwung' : 'Schwünge'}`;
-  $('btnResults').style.display = n || state.ref ? '' : 'none';
+  $('btnResults').style.display = state.all.length || state.ref ? '' : 'none';
+}
+
+// ---------- storage (IndexedDB) ----------
+// Swings incl. image blobs survive closing the app. A session = one calendar day.
+const sessKey = (ts) => { const d = new Date(ts); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+const sessLabel = (k) => new Date(k + 'T12:00').toLocaleDateString('de-DE', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+let dbP = null;
+function db() {
+  dbP ??= new Promise((res, rej) => {
+    const r = indexedDB.open('swinglab', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('swings', { keyPath: 'id' });
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+  return dbP;
+}
+async function dbDo(mode, fn) {
+  const d = await db();
+  return new Promise((res, rej) => {
+    const tx = d.transaction('swings', mode); const st = tx.objectStore('swings');
+    const req = fn(st);
+    tx.oncomplete = () => res(req?.result); tx.onerror = () => rej(tx.error); tx.onabort = () => rej(tx.error);
+  });
+}
+async function dbPut(sw) {
+  const { _imgs, ...rec } = sw;
+  try { await dbDo('readwrite', (st) => st.put(rec)); }
+  catch (e) { console.error(e); toast('⚠️ Speichern fehlgeschlagen' + (e?.name === 'QuotaExceededError' ? ' – Speicher voll' : '')); }
+}
+const dbDel = (ids) => dbDo('readwrite', (st) => { ids.forEach((id) => st.delete(id)); }).catch(console.error);
+function refreshView() {
+  state.swings = state.all.filter((s) => s.session === state.session).sort((a, b) => a.created - b.created);
+}
+function addSwing(sw) {
+  sw.session = sessKey(sw.created);
+  state.all.push(sw); state.session = sw.session; refreshView();
+  dbPut(sw);
+}
+function setRef(sw) {
+  if (state.ref) dbDel([state.ref.id]);
+  state.ref = sw; if (sw) { sw.isRef = true; dbPut(sw); }
+}
+function removeSwing(sw) {
+  if (sw === state.ref) { state.ref = null; } else { state.all = state.all.filter((s) => s !== sw); refreshView(); }
+  dbDel([sw.id]);
+}
+async function loadStored() {
+  try {
+    navigator.storage?.persist?.();
+    const recs = (await dbDo('readonly', (st) => st.getAll())) || [];
+    for (const r of recs) {
+      if (r.isRef) { if (!state.ref || r.created > state.ref.created) state.ref = r; }
+      else { r.session ??= sessKey(r.created); state.all.push(r); }
+    }
+    const keys = [...new Set(state.all.map((s) => s.session))].sort();
+    state.session = keys.includes(sessKey(Date.now())) ? sessKey(Date.now()) : keys.at(-1) ?? sessKey(Date.now());
+    refreshView();
+  } catch (e) { console.error(e); toast('⚠️ Gespeicherte Schwünge konnten nicht geladen werden'); }
+  updateCount();
 }
 
 async function openCamera() {
@@ -142,6 +201,7 @@ async function openCamera() {
 }
 
 async function startSession() {
+  state.session = sessKey(Date.now()); refreshView(); updateCount();
   show('session');
   $('loading').style.display = 'flex';
   beep(660, 0.01); // unlock audio inside the tap
@@ -239,7 +299,7 @@ async function onLiveSwing(win) {
     const res = analyzeSwing(win, heightCm());
     if (!res.ok) { toast('Kein Schwung: ' + res.reason); return; }
     const sw = await buildSwing(win, res, (f) => sess.pool[f.slot], sess.w, sess.h, 'live');
-    state.swings.push(sw);
+    addSwing(sw);
     updateCount();
     beep(1318, 0.15);
     toast(`Schwung ${state.swings.length} ✓  Tempo ${fmt(sw.metrics.tempo, 1)}:1`);
@@ -298,7 +358,7 @@ async function importVideo(file, asRef) {
     if (!res.ok) throw new Error(res.reason + ' – Clip am besten auf einen Schwung kürzen.');
     const sw = await buildSwing(frames, res, () => null, w, h, asRef ? 'ref' : 'import');
     sw.name = file.name;
-    if (asRef) state.ref = sw; else state.swings.push(sw);
+    if (asRef) setRef(sw); else addSwing(sw);
     updateCount();
     msg.textContent = asRef ? '⭐️ Referenz geladen.' : '✓ Schwung importiert.';
     bar.style.width = '100%';
@@ -347,6 +407,11 @@ function openResults() {
   const n = state.swings.length;
   $('resEmpty').style.display = n || state.ref ? 'none' : '';
   $('resBody').style.display = n || state.ref ? '' : 'none';
+  const keys = [...new Set([...state.all.map((s) => s.session), state.session])].sort().reverse();
+  const counts = Object.fromEntries(keys.map((k) => [k, state.all.filter((s) => s.session === k).length]));
+  $('sessSel').innerHTML = keys.map((k) => `<option value="${k}"${k === state.session ? ' selected' : ''}>${sessLabel(k)} · ${counts[k]} ${counts[k] === 1 ? 'Schwung' : 'Schwünge'}</option>`).join('');
+  $('sessDel').style.display = n ? '' : 'none';
+  $('aiOut').style.display = 'none';
   const cols = [{ title: `Ø Du (${n})`, metrics: sessionAverages() }];
   if (state.ref) cols.push({ title: '⭐️ Ref.', metrics: state.ref.metrics, dots: false });
   $('sumTable').innerHTML = metricsTable(null, cols);
@@ -394,7 +459,8 @@ async function openDetail(sw) {
   const isRef = sw === state.ref;
   $('detTitle').textContent = isRef ? '⭐️ Referenz' : `Schwung #${state.swings.indexOf(sw) + 1}`;
   $('detDel').onclick = () => {
-    if (isRef) state.ref = null; else state.swings.splice(state.swings.indexOf(sw), 1);
+    if (!confirm(isRef ? 'Referenz löschen?' : 'Diesen Schwung löschen?')) return;
+    removeSwing(sw);
     updateCount(); openResults();
   };
   player.imgs = await loadImgs(sw);
@@ -624,13 +690,20 @@ $('resBack').onclick = () => show('home');
 $('resCam').onclick = startSession;
 $('detBack').onclick = () => { player.playing = false; openResults(); };
 $('btnAI').onclick = runAI;
+$('sessSel').onchange = (e) => { state.session = e.target.value; refreshView(); updateCount(); openResults(); };
+$('sessDel').onclick = () => {
+  if (!confirm(`Alle ${state.swings.length} Schwünge vom ${sessLabel(state.session)} löschen?`)) return;
+  dbDel(state.swings.map((s) => s.id));
+  state.all = state.all.filter((s) => s.session !== state.session); refreshView();
+  updateCount(); openResults();
+};
 $('btnImport').onclick = () => $('fileImport').click();
 $('btnRef').onclick = () => $('fileRef').click();
 $('fileImport').onchange = (e) => { importVideo(e.target.files[0], false); e.target.value = ''; };
 $('fileRef').onchange = (e) => { importVideo(e.target.files[0], true); e.target.value = ''; };
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && sess.running) keepAwake(); });
-updateCount();
+loadStored();
 
 // expose for testing
-window.__swing = { state, sess, importVideo, openResults, runAI, buildSwing, analyzeSwing, openDetail, updateCount };
+window.__swing = { state, sess, importVideo, openResults, runAI, buildSwing, analyzeSwing, openDetail, updateCount, addSwing, setRef, removeSwing };
 void L;
