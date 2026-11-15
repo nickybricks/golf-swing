@@ -9,7 +9,10 @@ const MODELS = {
 };
 const CONN = [[11,12],[11,13],[13,15],[12,14],[14,16],[11,23],[12,24],[23,24],[23,25],[25,27],[24,26],[26,28],[27,31],[28,32],[27,29],[28,30]];
 const P_KEYS = ['P1','P3','P4','P6','P7','P10'];
-const THUMB_LONG = 480;
+const IMG_LONG = 1080;    // stored frame size (long side, px)
+const IMG_Q = 0.82;        // JPEG quality of stored frames
+const POOL_N = 240;        // live ring buffer length (frames)
+const FALLBACK_LONG = 480; // canvas ring buffer if the encoder worker is unavailable
 
 const $ = (id) => document.getElementById(id);
 const state = { all: [], session: null, swings: [], ref: null, landmarker: null, landmarkerModel: null, lastTs: 0, current: null };
@@ -187,7 +190,7 @@ async function loadStored() {
 }
 
 async function openCamera() {
-  const base = { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 60 } };
+  const base = { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60 } };
   let stream = await navigator.mediaDevices.getUserMedia({ video: base, audio: false });
   if ($('setCam').value === 'ultra') {
     const devs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput');
@@ -220,10 +223,11 @@ async function startSession() {
   $('loading').style.display = 'none';
   const v = $('video');
   sess.w = v.videoWidth; sess.h = v.videoHeight;
-  // image ring buffer
-  const k = THUMB_LONG / Math.max(sess.w, sess.h);
-  const tw = Math.round(sess.w * k), th = Math.round(sess.h * k);
-  sess.pool = Array.from({ length: 220 }, () => { const c = document.createElement('canvas'); c.width = tw; c.height = th; return c; });
+  // image ring buffer: JPEGs encoded in a worker (full quality, low memory); canvas pool as fallback
+  sess.enc = startEncoder();
+  const k = Math.min(1, (sess.enc ? IMG_LONG : FALLBACK_LONG) / Math.max(sess.w, sess.h));
+  sess.tw = Math.round(sess.w * k); sess.th = Math.round(sess.h * k);
+  sess.pool = sess.enc ? [] : Array.from({ length: POOL_N }, () => { const c = document.createElement('canvas'); c.width = sess.tw; c.height = sess.th; return c; });
   sess.poolIdx = 0; sess.freeze = false; sess.readySince = null;
   sess.seg = new LiveSegmenter(onLiveSwing);
   sess.running = true;
@@ -237,6 +241,36 @@ function stopSession() {
   sess.stream = null;
   try { wake?.release(); } catch {}
   sess.pool = [];
+  sess.enc?.worker.terminate(); sess.enc = null;
+}
+
+function startEncoder() {
+  if (typeof OffscreenCanvas === 'undefined' || !OffscreenCanvas.prototype.convertToBlob || !window.createImageBitmap) return null;
+  try {
+    const worker = new Worker('./encoder.js');
+    const enc = { worker, pending: 0, idle: [], reqs: new Map(), nextId: 1 };
+    worker.onmessage = (e) => {
+      const m = e.data;
+      if (m.type === 'done') { enc.pending--; if (enc.pending <= 0) { enc.pending = 0; enc.idle.splice(0).forEach((r) => r()); } }
+      else if (m.type === 'blobs') { enc.reqs.get(m.id)?.(m.blobs); enc.reqs.delete(m.id); }
+    };
+    worker.onerror = (e) => console.error('encoder', e);
+    return enc;
+  } catch (e) { console.error(e); return null; }
+}
+function encodeFrame(v, slot) {
+  const enc = sess.enc;
+  if (enc.pending > 20) { enc.worker.postMessage({ type: 'drop', slot }); return; } // worker behind → skip image, never show a stale one
+  enc.pending++;
+  createImageBitmap(v).then(
+    (bmp) => enc.worker.postMessage({ type: 'frame', slot, bmp, w: sess.tw, h: sess.th, q: IMG_Q }, [bmp]),
+    () => { enc.pending--; enc.worker.postMessage({ type: 'drop', slot }); },
+  );
+}
+async function encoderBlobs(enc, slots) {
+  if (enc.pending > 0) await Promise.race([new Promise((r) => enc.idle.push(r)), new Promise((r) => setTimeout(r, 4000))]);
+  const id = enc.nextId++;
+  return new Promise((r) => { enc.reqs.set(id, r); enc.worker.postMessage({ type: 'get', id, slots }); });
 }
 
 let lastVideoTime = -1;
@@ -266,10 +300,10 @@ function loop() {
 
   // buffer frame
   let slot = -1;
-  if (!sess.freeze && sess.pool.length) {
-    slot = sess.poolIdx; sess.poolIdx = (sess.poolIdx + 1) % sess.pool.length;
-    const c = sess.pool[slot];
-    c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+  if (!sess.freeze && (sess.enc || sess.pool.length)) {
+    slot = sess.poolIdx; sess.poolIdx = (sess.poolIdx + 1) % POOL_N;
+    if (sess.enc) encodeFrame(v, slot);
+    else { const c = sess.pool[slot]; c.getContext('2d').drawImage(v, 0, 0, c.width, c.height); }
   }
   const frame = { t, lm: res.lm, wlm: res.wlm, slot };
   const prevState = sess.seg.state;
@@ -298,7 +332,11 @@ async function onLiveSwing(win) {
   try {
     const res = analyzeSwing(win, heightCm());
     if (!res.ok) { toast('Kein Schwung: ' + res.reason); return; }
-    const sw = await buildSwing(win, res, (f) => sess.pool[f.slot], sess.w, sess.h, 'live');
+    const enc = sess.enc, pool = sess.pool;
+    const getBlobs = enc
+      ? (part) => encoderBlobs(enc, part.map((f) => f.slot))
+      : (part) => Promise.all(part.map((f) => (pool[f.slot] ? new Promise((r) => pool[f.slot].toBlob(r, 'image/jpeg', IMG_Q)) : null)));
+    const sw = await buildSwing(win, res, getBlobs, sess.w, sess.h, 'live');
     addSwing(sw);
     updateCount();
     beep(1318, 0.15);
@@ -308,15 +346,11 @@ async function onLiveSwing(win) {
 }
 
 // Trim frames around the swing, encode images, re-index events.
-async function buildSwing(frames, res, getCanvas, w, h, source) {
+async function buildSwing(frames, res, getBlobs, w, h, source) {
   const a = Math.max(0, res.idx.P1 - 6), b = Math.min(frames.length - 1, res.idx.P10 + 10);
   const part = frames.slice(a, b + 1);
   const idx = Object.fromEntries(Object.entries(res.idx).map(([k, v]) => [k, v - a]));
-  const blobs = [];
-  for (const f of part) {
-    const c = f.blob ? null : getCanvas(f);
-    blobs.push(f.blob || (c ? await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.72)) : null));
-  }
+  const blobs = getBlobs ? await getBlobs(part) : part.map((f) => f.blob || null);
   const thumbCanvas = await keyframeCanvas({ frames: part, blobs, w, h }, idx.P4, 270);
   return {
     id: Math.random().toString(36).slice(2, 8), source, created: Date.now(),
@@ -340,7 +374,7 @@ async function importVideo(file, asRef) {
     const w = v.videoWidth, h = v.videoHeight;
     const dur = Math.min(v.duration || 0, 20);
     const step = dur <= 5 ? 1 / 60 : 1 / 30;
-    const k = THUMB_LONG / Math.max(w, h);
+    const k = Math.min(1, IMG_LONG / Math.max(w, h));
     const c = document.createElement('canvas'); c.width = Math.round(w * k); c.height = Math.round(h * k);
     const cx = c.getContext('2d');
     const frames = [];
@@ -348,7 +382,7 @@ async function importVideo(file, asRef) {
       await seek(v, t);
       const r = detect(v, w, h);
       cx.drawImage(v, 0, 0, c.width, c.height);
-      const blob = await new Promise((rs) => c.toBlob(rs, 'image/jpeg', 0.72));
+      const blob = await new Promise((rs) => c.toBlob(rs, 'image/jpeg', IMG_Q));
       frames.push({ t, lm: r.lm, wlm: r.wlm, blob });
       bar.style.width = `${Math.round((t / dur) * 100)}%`;
       msg.textContent = `Analysiere Bild ${frames.length} …`;
@@ -356,7 +390,7 @@ async function importVideo(file, asRef) {
     URL.revokeObjectURL(v.src);
     const res = analyzeSwing(frames, asRef ? 180 : heightCm());
     if (!res.ok) throw new Error(res.reason + ' – Clip am besten auf einen Schwung kürzen.');
-    const sw = await buildSwing(frames, res, () => null, w, h, asRef ? 'ref' : 'import');
+    const sw = await buildSwing(frames, res, null, w, h, asRef ? 'ref' : 'import');
     sw.name = file.name;
     if (asRef) setRef(sw); else addSwing(sw);
     updateCount();
@@ -429,18 +463,30 @@ function openResults() {
 }
 
 // ---------- detail / player ----------
-const player = { sw: null, i: 0, playing: false, imgs: [], last: 0, acc: 0 };
+const player = { sw: null, i: 0, playing: false, lastImg: null, last: 0, acc: 0 };
 
-async function loadImgs(sw) {
-  if (sw._imgs) return sw._imgs;
-  sw._imgs = await Promise.all(sw.blobs.map((b) => (b ? createImageBitmap(b) : null)));
-  return sw._imgs;
+// Decoded frames are big (full HD ≈ 2.6 MB each) → decode on demand, keep a small LRU cache.
+const imgCache = new Map(); // key → { bmp, p }
+const IMG_CACHE_MAX = 60;
+function frameImg(sw, i) {
+  // nearest stored image at or before i (a frame may have no image if the encoder skipped it)
+  let j = i; while (j > 0 && !sw.blobs[j]) j--;
+  if (!sw.blobs[j]) return { bmp: null, p: Promise.resolve(null) };
+  const key = sw.id + ':' + j;
+  let e = imgCache.get(key);
+  if (e) { imgCache.delete(key); imgCache.set(key, e); return e; }
+  e = { bmp: null };
+  e.p = createImageBitmap(sw.blobs[j]).then((b) => { e.bmp = b; return b; }, () => null);
+  imgCache.set(key, e);
+  while (imgCache.size > IMG_CACHE_MAX) {
+    const [k0, e0] = imgCache.entries().next().value;
+    imgCache.delete(k0); e0.p.then((b) => b?.close?.());
+  }
+  return e;
 }
 
 async function keyframeCanvas(sw, i, width = 360, label) {
-  const imgs = sw._imgs || [];
-  const blob = sw.blobs[i];
-  const img = imgs[i] || (blob ? await createImageBitmap(blob) : null);
+  const img = await frameImg(sw, i).p;
   const ar = sw.h / sw.w;
   const c = document.createElement('canvas'); c.width = width; c.height = Math.round(width * ar);
   const x = c.getContext('2d');
@@ -455,7 +501,7 @@ async function keyframeCanvas(sw, i, width = 360, label) {
 
 async function openDetail(sw) {
   show('detail');
-  player.sw = sw; player.i = sw.idx.P1; player.playing = false;
+  player.sw = sw; player.i = sw.idx.P1; player.playing = false; player.lastImg = null;
   const isRef = sw === state.ref;
   $('detTitle').textContent = isRef ? '⭐️ Referenz' : `Schwung #${state.swings.indexOf(sw) + 1}`;
   $('detDel').onclick = () => {
@@ -463,8 +509,7 @@ async function openDetail(sw) {
     removeSwing(sw);
     updateCount(); openResults();
   };
-  player.imgs = await loadImgs(sw);
-  if (state.ref && !isRef) await loadImgs(state.ref);
+  await frameImg(sw, player.i).p;
   const seekEl = $('plSeek'); seekEl.max = sw.frames.length - 1; seekEl.value = player.i;
   // chips
   $('pChips').innerHTML = '';
@@ -482,7 +527,7 @@ async function openDetail(sw) {
   for (const k of P_KEYS) {
     for (const s of ref ? [sw, ref] : [sw]) {
       const fig = document.createElement('figure');
-      fig.appendChild(await keyframeCanvas(s, s.idx[k], 360));
+      fig.appendChild(await keyframeCanvas(s, s.idx[k], 600));
       const cap = document.createElement('figcaption'); cap.textContent = `${k}${s === ref ? ' ⭐️' : ''}`; cap.title = P_LABELS[k];
       fig.appendChild(cap); grid.appendChild(fig);
     }
@@ -496,13 +541,17 @@ async function openDetail(sw) {
 function renderPlayer() {
   const sw = player.sw; if (!sw) return;
   const cv = $('player');
-  const W = Math.min(900, cv.clientWidth * devicePixelRatio || 600);
+  const W = Math.min(1400, cv.clientWidth * devicePixelRatio || 600);
   const Hh = Math.round(W * sw.h / sw.w);
   if (cv.width !== W || cv.height !== Hh) { cv.width = W; cv.height = Hh; }
   const x = cv.getContext('2d');
   x.fillStyle = '#000'; x.fillRect(0, 0, W, Hh);
-  const img = player.imgs[player.i];
-  if (img) x.drawImage(img, 0, 0, W, Hh);
+  const e = frameImg(sw, player.i);
+  const img = e.bmp || player.lastImg;
+  if (!e.bmp) { const want = player.i; e.p.then((b) => { if (b && player.sw === sw && player.i === want) renderPlayer(); }); }
+  else player.lastImg = e.bmp;
+  for (let n = 1; n <= 6 && player.i + n < sw.blobs.length; n++) frameImg(sw, player.i + n); // prefetch
+  if (img) { try { x.drawImage(img, 0, 0, W, Hh); } catch { /* bitmap evicted */ } }
   const s = W / sw.w;
   // address reference lines (posture check)
   const A = sw.frames[sw.idx.P1].lm;
@@ -543,8 +592,7 @@ $('plSeek').oninput = (e) => { player.playing = false; $('plPlay').textContent =
 
 // ---------- AI coach ----------
 async function contactSheet(sw, title) {
-  const w = 240; const cells = [];
-  await loadImgs(sw);
+  const w = 260; const cells = [];
   for (const k of P_KEYS) cells.push(await keyframeCanvas(sw, sw.idx[k], w, `${k} ${P_LABELS[k]}`));
   const c = document.createElement('canvas'); c.width = w * cells.length; c.height = cells[0].height + 30;
   const x = c.getContext('2d'); x.fillStyle = '#111'; x.fillRect(0, 0, c.width, c.height);
@@ -705,5 +753,5 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 loadStored();
 
 // expose for testing
-window.__swing = { state, sess, importVideo, openResults, runAI, buildSwing, analyzeSwing, openDetail, updateCount, addSwing, setRef, removeSwing };
+window.__swing = { state, sess, importVideo, openResults, runAI, buildSwing, analyzeSwing, updateCount, addSwing, setRef, removeSwing, startEncoder, encodeFrame, encoderBlobs, openDetail };
 void L;
