@@ -127,6 +127,7 @@ textarea{font:inherit;color:var(--txt);background:#0f1412;border:1px solid var(-
     <p class="hint">Ohne Key funktionieren Messung und Vergleich trotzdem, nur der KI-Coach nicht.</p>
   </details>
   <p class="hint" style="margin-top:18px">Schwünge werden automatisch und nur auf diesem Gerät gespeichert. Nichts wird hochgeladen außer der KI-Anfrage an Claude.</p>
+  <p class="hint" id="ver"></p>
 </section>
 
 <!-- SESSION -->
@@ -190,6 +191,17 @@ textarea{font:inherit;color:var(--txt);background:#0f1412;border:1px solid var(-
   <div class="card"><table id="detTable"></table></div>
 </section>
 
-<script type="module" src="app.js"></script>
+<script>
+// Self-update: iOS keeps old files in its HTTP cache. If the server has a newer version, refresh the cache and reload once.
+const APP_VERSION = '3';
+document.getElementById('ver').textContent = 'Version ' + APP_VERSION;
+fetch('version.json', { cache: 'no-store' }).then((r) => r.json()).then(async (j) => {
+  if (String(j.v) === APP_VERSION || sessionStorage.getItem('sl_upd') === String(j.v)) return;
+  sessionStorage.setItem('sl_upd', String(j.v)); // at most one reload per version → no loop
+  await Promise.all(['./', 'index.html', 'app.js?v=' + j.v, 'analysis.js', 'encoder.js'].map((u) => fetch(u, { cache: 'reload' }).catch(() => {})));
+  location.reload();
+}).catch(() => {});
+</script>
+<script type="module" src="app.js?v=3"></script>
 </body>
 </html>
