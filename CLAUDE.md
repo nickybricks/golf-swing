@@ -3,6 +3,8 @@
 Golf-Schwunganalyse als PWA fürs iPhone (Nick, iPhone 17 Pro Max, Rechtshänder-Erkennung automatisch, Körpergröße 193 cm).
 Live: https://nickybricks.github.io/golf-swing/ (GitHub Pages, Branch `main`, Root). Push auf `main` = Deploy nach ca. 1 Min.
 
+Bei jedem Deploy die Version hochzählen: `APP_VERSION` und `app.js?v=` in `index.html` sowie `version.json` (Selbst-Update gegen den iOS-Cache; Version steht unten auf der Startseite).
+
 ## Architektur
 - `index.html`: UI (4 Screens: home, session, results, detail), CSS inline
 - `app.js`: Speicherung (IndexedDB), Kamera (getUserMedia), MediaPipe Pose Landmarker (CDN jsdelivr `@mediapipe/tasks-vision@1.2.0`, Modelle von storage.googleapis), Live-Loop, Ring-Buffer für Bilder, Video-Import (Seek pro Frame), Ergebnis-/Detail-Ansicht, KI-Coach (Claude Messages API direkt aus dem Browser, Header `anthropic-dangerous-direct-browser-access`)
