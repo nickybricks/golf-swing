@@ -18,6 +18,7 @@ Bei jedem Deploy die Version hochzählen: `APP_VERSION` und `app.js?v=` in `inde
 - Ergebnis-Screen: Auswahl (`state.scope`: alle / letzte 5·10·20 / angetippte Schwünge) gilt für Durchschnitt, KI-Coach und Export
 - KI-Coach ist ein Chat mit Rückfragen; Texte pro Session in localStorage (`sl_chat_<session>`), Bilder nur im ersten Request
 - Export: JSON (Kennzahlen, Schlüsselpositionen, Handpfad, Thumbnails – keine Videobilder) über Teilen-Dialog, plus CSV in die Zwischenablage
+- „Bilder teilen“ in der Detailansicht: 7 JPEGs je Schwung (Ansprechen in voller Auflösung, 3×2-Bögen für Positionen, Rück-/Ab-/Durchschwung, Treffzone) über den Teilen-Dialog; bei iOS ggf. zweiter Tipp nötig
 - ✕ in der Live-Session = Aufnahme abbrechen (Schwünge seit Kamerastart auf Wunsch verwerfen)
 - Kein Key und keine fremden Videos im Repo (Repo ist öffentlich). Referenz-Clips lädt Nick selbst lokal in der App.
 - Bildqualität: Kamera 1080p60 angefragt, gespeicherte Frames 1080 px lange Seite, JPEG 0.82 (`IMG_LONG`/`IMG_Q`); Player dekodiert bei Bedarf mit LRU-Cache (60 Bitmaps), nie alle Frames auf einmal (iOS-Speicher)
