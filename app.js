@@ -565,7 +565,7 @@ function frameImg(sw, i) {
   return e;
 }
 
-async function keyframeCanvas(sw, i, width = 360, label) {
+async function keyframeCanvas(sw, i, width = 360, label, pose = true) {
   const img = await frameImg(sw, i).p;
   const ar = sw.h / sw.w;
   const c = document.createElement('canvas'); c.width = width; c.height = Math.round(width * ar);
@@ -573,8 +573,10 @@ async function keyframeCanvas(sw, i, width = 360, label) {
   x.fillStyle = '#000'; x.fillRect(0, 0, c.width, c.height);
   if (img) x.drawImage(img, 0, 0, c.width, c.height);
   const s = c.width / sw.w;
-  drawSpine(x, sw.frames[i].lm, s, s);
-  drawPose(x, sw.frames[i].lm, s, s, 0, 0, '#3ddc84', Math.max(2, width / 140));
+  if (pose) {
+    drawSpine(x, sw.frames[i].lm, s, s);
+    drawPose(x, sw.frames[i].lm, s, s, 0, 0, '#3ddc84', Math.max(2, width / 140));
+  }
   if (label) { x.fillStyle = 'rgba(0,0,0,.6)'; x.fillRect(0, 0, c.width, 28); x.fillStyle = '#fff'; x.font = 'bold 16px sans-serif'; x.fillText(label, 8, 20); }
   return c;
 }
@@ -582,6 +584,7 @@ async function keyframeCanvas(sw, i, width = 360, label) {
 async function openDetail(sw) {
   show('detail');
   player.sw = sw; player.i = sw.idx.P1; player.playing = false; player.lastImg = null;
+  shareReady = null; $('detShare').textContent = '📤 Bilder teilen';
   const isRef = sw === state.ref;
   $('detTitle').textContent = isRef ? '⭐️ Referenz' : `Schwung #${state.swings.indexOf(sw) + 1}`;
   $('detDel').onclick = () => {
@@ -669,6 +672,83 @@ $('plPlay').onclick = () => {
   }
 };
 $('plSeek').oninput = (e) => { player.playing = false; $('plPlay').textContent = '▶︎'; player.i = Number(e.target.value); renderPlayer(); };
+
+// ---------- share images ----------
+// Image sheets of one swing (3×2 frames each) so it can be looked at outside the app:
+// key positions, backswing, downswing and the consecutive frames around impact.
+const SHEET_W = 480;
+async function sheetBlob(sw, title, cells, pose = false) {
+  const ch = Math.round(SHEET_W * sw.h / sw.w), cols = Math.min(3, cells.length), rows = Math.ceil(cells.length / cols);
+  const c = document.createElement('canvas'); c.width = SHEET_W * cols; c.height = ch * rows + 36;
+  const x = c.getContext('2d'); x.fillStyle = '#111'; x.fillRect(0, 0, c.width, c.height);
+  x.fillStyle = '#fff'; x.font = 'bold 20px sans-serif'; x.fillText(title, 10, 25);
+  for (let n = 0; n < cells.length; n++) {
+    const [i, label] = cells[n];
+    x.drawImage(await keyframeCanvas(sw, i, SHEET_W, label, pose), (n % cols) * SHEET_W, 36 + Math.floor(n / cols) * ch);
+  }
+  const blob = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.85));
+  c.width = c.height = 0; // free canvas memory early (iOS)
+  return blob;
+}
+async function swingSheets(sw, onStep) {
+  const I = sw.idx, last = sw.frames.length - 1;
+  const nr = sw === state.ref ? 'Referenz' : `Schwung #${state.swings.indexOf(sw) + 1}`;
+  const ms = (i) => { const d = Math.round((sw.frames[i].t - sw.frames[I.P7].t) * 1000); return `${d > 0 ? '+' : ''}${d} ms`; };
+  const spread = (a, b, n = 6) => [...new Set(Array.from({ length: n }, (_, k) => Math.round(a + ((b - a) * k) / (n - 1))))];
+  const cell = (i) => { const k = P_KEYS.find((p) => I[p] === i); return [i, `${k ? k + ' · ' : ''}Bild ${i} · ${ms(i)}`]; };
+  const keys = P_KEYS.map((k) => [I[k], `${k} ${P_LABELS[k]}`]);
+  const a0 = Math.max(0, Math.min(I.P7 - 3, last - 5));
+  const plan = [
+    ['1-ansprechen', 'Ansprechen (volle Auflösung)', null],
+    ['2-positionen', 'Positionen P1–P10', keys, false],
+    ['3-positionen-skelett', 'Positionen mit Skelett', keys, true],
+    ['4-rueckschwung', 'Rückschwung (Ansprechen → Top)', spread(I.P1, I.P4).map(cell), false],
+    ['5-abschwung', 'Abschwung (Top → Treffmoment)', spread(I.P4, I.P7).map(cell), false],
+    ['6-treffzone', 'Treffzone – aufeinanderfolgende Bilder (ms relativ zu P7)', spread(a0, Math.min(last, a0 + 5)).map(cell), false],
+    ['7-durchschwung', 'Durchschwung (Treffmoment → Finish)', spread(I.P7, I.P10).map(cell), false],
+  ];
+  const files = [];
+  for (const [name, title, cells, pose] of plan) {
+    onStep?.(files.length + 1, plan.length);
+    let blob;
+    if (cells) blob = await sheetBlob(sw, `${nr} – ${title}`, cells, pose);
+    else { // original stored frame at address, untouched
+      let j = I.P1; while (j > 0 && !sw.blobs[j]) j--;
+      blob = sw.blobs[j];
+    }
+    if (blob) files.push(new File([blob], `swing-${sw.id}-${name}.jpg`, { type: 'image/jpeg' }));
+  }
+  return files;
+}
+async function shareFiles(files) {
+  if (navigator.canShare?.({ files })) { await navigator.share({ files }); return; }
+  for (const f of files) { // no share sheet (desktop) → download
+    const a = document.createElement('a'); a.href = URL.createObjectURL(f); a.download = f.name;
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+  }
+}
+let shareReady = null; // { sw, files } prepared sheets waiting for a tap
+async function shareSwingImages() {
+  const b = $('detShare'), sw = player.sw; if (!sw || b.disabled) return;
+  const reset = () => { shareReady = null; b.textContent = '📤 Bilder teilen'; };
+  try {
+    if (shareReady?.sw !== sw) {
+      b.disabled = true;
+      const files = await swingSheets(sw, (n, of) => { b.textContent = `Erstelle Bild ${n}/${of} …`; });
+      b.disabled = false;
+      if (player.sw !== sw) return reset();
+      shareReady = { sw, files };
+    }
+    await shareFiles(shareReady.files);
+    reset();
+  } catch (e) {
+    b.disabled = false;
+    if (e?.name === 'AbortError') return reset();
+    // iOS only opens the share sheet directly from a tap; creating the images took too long → ask for a second tap
+    if (e?.name === 'NotAllowedError' && shareReady) { b.textContent = `✓ Fertig – jetzt teilen (${shareReady.files.length} Bilder)`; return; }
+    console.error(e); reset(); alert('Bilder konnten nicht geteilt werden: ' + (e.message || e));
+  }
+}
 
 // ---------- AI coach ----------
 async function contactSheet(sw, title) {
@@ -890,6 +970,7 @@ $('btnAI').onclick = runAI;
 $('chatSend').onclick = sendChat;
 $('btnExport').onclick = shareExport;
 $('btnCopy').onclick = copyMetrics;
+$('detShare').onclick = shareSwingImages;
 $('sessSel').onchange = (e) => { state.session = e.target.value; state.picked.clear(); refreshView(); updateCount(); openResults(); };
 $('sessDel').onclick = () => {
   const pick = state.scope === 'pick';
@@ -909,5 +990,5 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 loadStored();
 
 // expose for testing
-window.__swing = { chat, scoped, exportData, metricsCsv, state, sess, importVideo, openResults, runAI, buildSwing, analyzeSwing, updateCount, addSwing, setRef, removeSwing, startEncoder, encodeFrame, encoderBlobs, openDetail };
+window.__swing = { swingSheets, chat, scoped, exportData, metricsCsv, state, sess, importVideo, openResults, runAI, buildSwing, analyzeSwing, updateCount, addSwing, setRef, removeSwing, startEncoder, encodeFrame, encoderBlobs, openDetail };
 void L;
