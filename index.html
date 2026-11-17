@@ -76,6 +76,11 @@ input[type=range]{padding:0;border:0;background:none}
 .kf figure{margin:0;background:#000;border-radius:10px;overflow:hidden;position:relative}
 .kf canvas{width:100%;display:block}
 .kf figcaption{position:absolute;left:6px;top:6px;background:rgba(0,0,0,.6);padding:2px 8px;border-radius:8px;font-size:12px}
+.sw.sel{border-color:var(--acc);box-shadow:0 0 0 2px var(--acc) inset}
+.sw.dim{opacity:.45}
+.ai .me{background:#0f1412;border:1px solid var(--line);border-radius:12px;padding:8px 12px;margin:12px 0 8px auto;width:fit-content;max-width:90%;color:#cfd9d3;white-space:pre-wrap}
+.ai .bot+.me{margin-top:16px}
+textarea{font:inherit;color:var(--txt);background:#0f1412;border:1px solid var(--line);border-radius:10px;padding:10px 12px;width:100%;resize:none}
 .err{color:var(--bad)}
 .progress{height:6px;background:var(--line);border-radius:3px;overflow:hidden;margin-top:10px}.progress i{display:block;height:100%;background:var(--acc);width:0}
 </style>
@@ -121,7 +126,7 @@ input[type=range]{padding:0;border:0;background:none}
     <input id="setClaude" value="claude-sonnet-5-5">
     <p class="hint">Ohne Key funktionieren Messung und Vergleich trotzdem, nur der KI-Coach nicht.</p>
   </details>
-  <p class="hint" style="margin-top:18px">Schwünge werden nur auf diesem Gerät gespeichert. Nichts wird hochgeladen außer der KI-Anfrage an Claude.</p>
+  <p class="hint" style="margin-top:18px">Schwünge werden automatisch und nur auf diesem Gerät gespeichert. Nichts wird hochgeladen außer der KI-Anfrage an Claude.</p>
 </section>
 
 <!-- SESSION -->
@@ -146,11 +151,24 @@ input[type=range]{padding:0;border:0;background:none}
   <div class="row" style="margin-bottom:10px"><select id="sessSel"></select><button class="ghost" id="sessDel" style="flex:0 0 auto">🗑 Session</button></div>
   <div id="resEmpty" class="card" style="display:none">Noch keine Schwünge erfasst.</div>
   <div id="resBody">
+    <div class="chips" id="scopeChips"></div>
+    <p class="hint" id="scopeHint" style="margin:0 0 8px"></p>
     <div class="card"><table id="sumTable"></table>
       <p class="hint">Grün = im Richtwert-Korridor, gelb = knapp daneben, rot = deutlich daneben. „Schätzung“ = 3D-Wert aus einer einzigen Kamera, nur grob.</p></div>
     <h2>🤖 KI-Coach</h2>
     <button class="pri" id="btnAI" style="width:100%">Analyse von Claude holen</button>
     <div id="aiOut" class="card ai" style="display:none;margin-top:10px"></div>
+    <div id="chatRow" class="row" style="display:none;margin-top:8px;align-items:flex-end">
+      <textarea id="chatIn" rows="2" placeholder="Rückfrage an den Coach …"></textarea>
+      <button class="pri" id="chatSend" style="flex:0 0 auto">Senden</button>
+    </div>
+    <p class="hint" id="aiHint" style="display:none">Der Chat wird pro Session auf diesem Gerät gespeichert.</p>
+    <h2>Export</h2>
+    <div class="row">
+      <button class="ghost" id="btnExport">📤 Daten teilen (Datei)</button>
+      <button class="ghost" id="btnCopy">📋 Kennzahlen kopieren</button>
+    </div>
+    <p class="hint">Exportiert die oben gewählten Schwünge: Kennzahlen, Positionen und Vorschaubilder (ohne Videobilder).</p>
     <h2>Schwünge</h2>
     <div class="swings" id="swList"></div>
   </div>

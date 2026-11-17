@@ -15,7 +15,7 @@ const POOL_N = 240;        // live ring buffer length (frames)
 const FALLBACK_LONG = 480; // canvas ring buffer if the encoder worker is unavailable
 
 const $ = (id) => document.getElementById(id);
-const state = { all: [], session: null, swings: [], ref: null, landmarker: null, landmarkerModel: null, lastTs: 0, current: null };
+const state = { scope: 'all', picked: new Set(), all: [], session: null, swings: [], ref: null, landmarker: null, landmarkerModel: null, lastTs: 0, current: null };
 
 // ---------- settings ----------
 const S = {
@@ -230,6 +230,7 @@ async function startSession() {
   sess.pool = sess.enc ? [] : Array.from({ length: POOL_N }, () => { const c = document.createElement('canvas'); c.width = sess.tw; c.height = sess.th; return c; });
   sess.poolIdx = 0; sess.freeze = false; sess.readySince = null;
   sess.seg = new LiveSegmenter(onLiveSwing);
+  sess.runIds = [];
   sess.running = true;
   sess.fpsT = performance.now(); sess.fpsN = 0;
   loop();
@@ -338,6 +339,7 @@ async function onLiveSwing(win) {
       : (part) => Promise.all(part.map((f) => (pool[f.slot] ? new Promise((r) => pool[f.slot].toBlob(r, 'image/jpeg', IMG_Q)) : null)));
     const sw = await buildSwing(win, res, getBlobs, sess.w, sess.h, 'live');
     addSwing(sw);
+    sess.runIds?.push(sw.id);
     updateCount();
     beep(1318, 0.15);
     toast(`Schwung ${state.swings.length} ✓  Tempo ${fmt(sw.metrics.tempo, 1)}:1`);
@@ -430,9 +432,21 @@ function metricsTable(rows, cols) {
   return html;
 }
 
-function sessionAverages() {
+// Scope = which swings of the session count for averages, AI coach and export.
+const SCOPES = [['all', 'Alle'], [5, 'Letzte 5'], [10, 'Letzte 10'], [20, 'Letzte 20'], ['pick', 'Auswahl']];
+function scoped() {
+  if (state.scope === 'pick') return state.swings.filter((s) => state.picked.has(s.id));
+  return state.scope === 'all' ? state.swings : state.swings.slice(-state.scope);
+}
+function scopeLabel() {
+  const n = scoped().length;
+  if (state.scope === 'all') return `alle ${n} Schwünge`;
+  if (state.scope === 'pick') return `${n} ausgewählte Schwünge (${scoped().map((s) => '#' + (state.swings.indexOf(s) + 1)).join(', ')})`;
+  return `die letzten ${n} Schwünge`;
+}
+function sessionAverages(list = scoped()) {
   const out = {};
-  for (const k of Object.keys(CORRIDORS)) out[k] = avgOf(state.swings.map((s) => s.metrics[k]));
+  for (const k of Object.keys(CORRIDORS)) out[k] = avgOf(list.map((s) => s.metrics[k]));
   return out;
 }
 
@@ -445,8 +459,19 @@ function openResults() {
   const counts = Object.fromEntries(keys.map((k) => [k, state.all.filter((s) => s.session === k).length]));
   $('sessSel').innerHTML = keys.map((k) => `<option value="${k}"${k === state.session ? ' selected' : ''}>${sessLabel(k)} · ${counts[k]} ${counts[k] === 1 ? 'Schwung' : 'Schwünge'}</option>`).join('');
   $('sessDel').style.display = n ? '' : 'none';
-  $('aiOut').style.display = 'none';
-  const cols = [{ title: `Ø Du (${n})`, metrics: sessionAverages() }];
+  const pick = state.scope === 'pick';
+  $('sessDel').textContent = pick ? '🗑 Auswahl' : '🗑 Session';
+  const inScope = new Set(scoped());
+  $('scopeChips').innerHTML = '';
+  for (const [v, label] of SCOPES) {
+    if (typeof v === 'number' && n <= v) continue;
+    const b = document.createElement('button'); b.textContent = label; b.classList.toggle('on', state.scope === v);
+    b.onclick = () => { state.scope = v; openResultsKeepScroll(); };
+    $('scopeChips').appendChild(b);
+  }
+  $('scopeHint').textContent = pick ? `Schwünge unten antippen zum Aus-/Abwählen (${inScope.size} gewählt). Durchschnitt, KI-Coach und Export nutzen nur die Auswahl.` : state.scope === 'all' ? '' : 'Durchschnitt, KI-Coach und Export nutzen nur diese Schwünge.';
+  if (!chat.busy) { loadChat(); renderChat(); } // never wipe an answer that is still streaming
+  const cols = [{ title: `Ø Du (${inScope.size})`, metrics: sessionAverages() }];
   if (state.ref) cols.push({ title: '⭐️ Ref.', metrics: state.ref.metrics, dots: false });
   $('sumTable').innerHTML = metricsTable(null, cols);
   const list = $('swList');
@@ -455,11 +480,66 @@ function openResults() {
   items.forEach((sw) => {
     const i = state.swings.indexOf(sw);
     const b = document.createElement('button');
-    b.className = 'sw' + (sw === state.ref ? ' ref' : '');
+    b.className = 'sw' + (sw === state.ref ? ' ref' : pick ? (inScope.has(sw) ? ' sel' : '') : inScope.has(sw) ? '' : ' dim');
     b.innerHTML = `<img src="${sw.thumb}"><div><b>${sw === state.ref ? '⭐️ Referenz' : '#' + (i + 1)}</b><br>Tempo ${fmt(sw.metrics.tempo, 1)}:1</div>`;
-    b.onclick = () => openDetail(sw);
+    b.onclick = () => {
+      if (!pick || sw === state.ref) return openDetail(sw);
+      if (!state.picked.delete(sw.id)) state.picked.add(sw.id);
+      openResultsKeepScroll();
+    };
     list.appendChild(b);
   });
+}
+function openResultsKeepScroll() { const y = window.scrollY; openResults(); window.scrollTo(0, y); }
+
+// ---------- export ----------
+// Compact JSON (no video frames) so a session can be shared / analysed elsewhere.
+const r1 = (v) => Math.round(v * 10) / 10;
+function packSwing(s) {
+  const fl = fillLm(s.frames);
+  return {
+    id: s.id, nr: state.swings.indexOf(s) + 1 || null, created: new Date(s.created).toISOString(), source: s.source, name: s.name,
+    w: s.w, h: s.h, frames: s.frames.length, idx: s.idx, start: s.start, metrics: s.metrics,
+    t: s.frames.map((f) => Math.round((f.t - s.frames[0].t) * 1000)),
+    hands: fl.map((lm) => (lm ? [r1((lm[15].x + lm[16].x) / 2), r1((lm[15].y + lm[16].y) / 2)] : null)),
+    key: Object.fromEntries(P_KEYS.map((k) => [k, fl[s.idx[k]]?.map((p) => [r1(p.x), r1(p.y), Math.round((p.v ?? 1) * 100) / 100]) ?? null])),
+    thumb: s.thumb,
+  };
+}
+function fillLm(frames) { let last = null; return frames.map((f) => (last = f.lm || last)); }
+function exportData() {
+  return {
+    app: 'swinglab', format: 1, exported: new Date().toISOString(), session: state.session, scope: scopeLabel(), heightCm: heightCm(),
+    corridors: Object.fromEntries(Object.entries(CORRIDORS).map(([k, c]) => [k, { label: c.label, unit: c.unit, lo: c.lo, hi: c.hi }])),
+    average: sessionAverages(), ref: state.ref ? packSwing(state.ref) : null, swings: scoped().map(packSwing),
+    chat: chat.msgs.map((m) => ({ role: m.role, text: m.label || m.text })),
+  };
+}
+async function shareExport() {
+  if (!scoped().length) return alert('Keine Schwünge ausgewählt.');
+  const json = JSON.stringify(exportData());
+  const base = `swinglab-${state.session}`;
+  for (const f of [new File([json], base + '.json', { type: 'application/json' }), new File([json], base + '.txt', { type: 'text/plain' })]) {
+    if (navigator.canShare?.({ files: [f] })) {
+      try { await navigator.share({ files: [f] }); return; }
+      catch (e) { if (e?.name === 'AbortError') return; console.warn(e); }
+    }
+  }
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([json], { type: 'application/json' })); a.download = base + '.json';
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+}
+function metricsCsv() {
+  const keys = [...Object.keys(CORRIDORS), 'backswingMs', 'downswingMs'];
+  const rows = [['nr', 'zeit', 'quelle', ...keys].join(';')];
+  for (const s of scoped()) rows.push([state.swings.indexOf(s) + 1, new Date(s.created).toTimeString().slice(0, 8), s.source, ...keys.map((k) => (typeof s.metrics[k] === 'number' ? r1(s.metrics[k]) : ''))].join(';'));
+  return `Swing Lab ${state.session} – ${scopeLabel()}\n` + rows.join('\n');
+}
+async function copyMetrics() {
+  if (!scoped().length) return alert('Keine Schwünge ausgewählt.');
+  const b = $('btnCopy'), old = b.textContent;
+  try { await navigator.clipboard.writeText(metricsCsv()); b.textContent = '✓ Kopiert'; }
+  catch { b.textContent = '⚠️ Kopieren nicht möglich'; }
+  setTimeout(() => { b.textContent = old; }, 1800);
 }
 
 // ---------- detail / player ----------
@@ -601,37 +681,55 @@ async function contactSheet(sw, title) {
   return c.toDataURL('image/jpeg', 0.8).split(',')[1];
 }
 
-function bestRepresentative() {
-  // swing whose tempo is closest to the session median (a "typical" swing)
-  const sw = state.swings.filter((s) => s.metrics.tempo);
-  if (!sw.length) return state.swings.at(-1);
+function bestRepresentative(list) {
+  // swing whose tempo is closest to the median (a "typical" swing)
+  const sw = list.filter((s) => s.metrics.tempo);
+  if (!sw.length) return list.at(-1);
   const med = sw.map((s) => s.metrics.tempo).sort((a, b) => a - b)[Math.floor(sw.length / 2)];
   return sw.reduce((a, b) => (Math.abs(b.metrics.tempo - med) < Math.abs(a.metrics.tempo - med) ? b : a));
 }
 
 const round = (m) => Object.fromEntries(Object.entries(m).map(([k, v]) => [k, typeof v === 'number' ? Math.round(v * 10) / 10 : v]));
+const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
 
-async function runAI() {
-  const key = $('setKey').value.trim();
-  const out = $('aiOut'); out.style.display = '';
-  if (!key) { out.innerHTML = 'Bitte zuerst in den Einstellungen (Startseite) einen Claude API-Key eintragen.'; return; }
-  if (!state.swings.length) { out.textContent = 'Noch keine eigenen Schwünge.'; return; }
-  out.innerHTML = '<div class="row"><div class="spin" style="flex:none"></div><div>Claude schaut sich deine Schwünge an …</div></div>';
-  $('btnAI').disabled = true;
-  try {
-    const rep = bestRepresentative();
-    const content = [];
-    content.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: await contactSheet(rep, `Du – typischer Schwung #${state.swings.indexOf(rep) + 1}`) } });
-    if (state.ref) content.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: await contactSheet(state.ref, 'Referenz (Pro)') } });
-    const data = {
-      perspektive: 'Down-the-Line (Kamera hinter dem Spieler, Blick zum Ziel), Handy-Kamera, 2D-Pose-Erkennung (MediaPipe)',
-      haendigkeit: rep.metrics.handed, koerpergroesse_cm: heightCm(),
-      kennzahlen_definitionen: Object.fromEntries(Object.entries(CORRIDORS).map(([k, c]) => [k, `${c.label} [${c.unit}], Richtwert ${c.lo}…${c.hi}${c.est ? ' (3D-Schätzung aus 1 Kamera, unsicher)' : ''}`])),
-      schwuenge: state.swings.map((s, i) => ({ nr: i + 1, quelle: s.source, ...round(s.metrics) })),
-      durchschnitt: round(sessionAverages()),
-      referenz: state.ref ? round(state.ref.metrics) : null,
-    };
-    content.push({ type: 'text', text:
+// Conversation with the coach, one per session. Texts are kept in localStorage so the
+// analysis survives leaving the screen / closing the app; images only live in memory.
+const chat = { session: null, msgs: [], busy: false }; // msgs: { role, text, label?, content? }
+function loadChat() {
+  if (chat.session === state.session) return;
+  chat.session = state.session; chat.msgs = [];
+  try { chat.msgs = JSON.parse(S.get('chat_' + state.session, '[]')) || []; } catch {}
+}
+function saveChat() {
+  const k = 'chat_' + chat.session;
+  if (!chat.msgs.length) { try { localStorage.removeItem('sl_' + k); } catch {} return; }
+  S.set(k, JSON.stringify(chat.msgs.map(({ role, text, label }) => ({ role, text, label }))));
+}
+function renderChat() {
+  const out = $('aiOut'), has = chat.msgs.length > 0;
+  out.style.display = has ? '' : 'none';
+  out.innerHTML = chat.msgs.map((m) => (m.role === 'user' ? `<div class="me">${esc(m.label || m.text)}</div>` : `<div class="bot">${md(m.text)}</div>`)).join('');
+  $('chatRow').style.display = $('aiHint').style.display = has ? '' : 'none';
+  $('btnAI').textContent = has ? '↻ Neue Analyse (ersetzt den Chat)' : 'Analyse von Claude holen';
+  $('btnAI').className = has ? 'ghost' : 'pri';
+}
+
+async function analysisMessage() {
+  const list = scoped();
+  const rep = bestRepresentative(list);
+  const content = [];
+  content.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: await contactSheet(rep, `Du – typischer Schwung #${state.swings.indexOf(rep) + 1}`) } });
+  if (state.ref) content.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: await contactSheet(state.ref, 'Referenz (Pro)') } });
+  const data = {
+    perspektive: 'Down-the-Line (Kamera hinter dem Spieler, Blick zum Ziel), Handy-Kamera, 2D-Pose-Erkennung (MediaPipe)',
+    haendigkeit: rep.metrics.handed, koerpergroesse_cm: heightCm(),
+    auswahl: `${scopeLabel()} von ${state.swings.length} der Session ${state.session}`,
+    kennzahlen_definitionen: Object.fromEntries(Object.entries(CORRIDORS).map(([k, c]) => [k, `${c.label} [${c.unit}], Richtwert ${c.lo}…${c.hi}${c.est ? ' (3D-Schätzung aus 1 Kamera, unsicher)' : ''}`])),
+    schwuenge: list.map((s) => ({ nr: state.swings.indexOf(s) + 1, quelle: s.source, ...round(s.metrics) })),
+    durchschnitt: round(sessionAverages(list)),
+    referenz: state.ref ? round(state.ref.metrics) : null,
+  };
+  const text =
 `Hier sind die Daten meiner Golf-Session. Bild 1 zeigt die Schlüsselpositionen P1–P10 meines typischen Schwungs mit erkanntem Skelett (gelb gestrichelt = Wirbelsäulenachse).${state.ref ? ' Bild 2 zeigt dieselben Positionen eines Referenz-Schwungs (Pro).' : ''}
 
 ${JSON.stringify(data, null, 1)}
@@ -641,8 +739,38 @@ Bitte analysiere wie ein erfahrener Golflehrer auf Deutsch, knapp und konkret:
 ### Die 3 wichtigsten Baustellen – jeweils: was du siehst (Bild + Zahl), warum es den Ballflug beeinflusst, ein konkreter Drill
 ### Was schon gut ist
 ${state.ref ? '### Größte Unterschiede zur Referenz\n' : ''}### Konstanz über die Session (Streuung der Werte)
-Weise darauf hin, wenn ein Wert wahrscheinlich ein Messfehler ist (z. B. Hände verdeckt, Schätzwerte). Keine Einleitung.` });
+Weise darauf hin, wenn ein Wert wahrscheinlich ein Messfehler ist (z. B. Hände verdeckt, Schätzwerte). Keine Einleitung. Ich stelle danach evtl. Rückfragen.`;
+  content.push({ type: 'text', text });
+  return { role: 'user', text, label: `📊 Analyse: ${scopeLabel()}`, content };
+}
 
+async function runAI() {
+  if (chat.busy) return;
+  if (!scoped().length) return alert(state.swings.length ? 'Keine Schwünge ausgewählt.' : 'Noch keine eigenen Schwünge.');
+  if (chat.msgs.length && !confirm('Neue Analyse starten? Der bisherige Chat dieser Session wird ersetzt.')) return;
+  await askAI(analysisMessage, true);
+}
+async function sendChat() {
+  const t = $('chatIn').value.trim();
+  if (!t || chat.busy) return;
+  $('chatIn').value = '';
+  if (!(await askAI(() => ({ role: 'user', text: t })))) $('chatIn').value = t;
+}
+
+// Sends the conversation plus one new user message; returns true if an answer was stored.
+async function askAI(makeMsg, fresh = false) {
+  const key = $('setKey').value.trim();
+  if (!key) { alert('Bitte zuerst in den Einstellungen (Startseite) einen Claude API-Key eintragen.'); return false; }
+  chat.busy = true; $('btnAI').disabled = $('chatSend').disabled = true;
+  const out = $('aiOut');
+  const session = chat.session, before = fresh ? [] : chat.msgs.slice();
+  let ok = false;
+  try {
+    keepAwake(); // display lock would kill the request on iOS
+    const msg = await makeMsg();
+    chat.msgs = [...before, msg]; renderChat();
+    const el = document.createElement('div'); el.className = 'bot'; out.appendChild(el);
+    el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     const model = $('setClaude').value.trim() || 'claude-sonnet-5-5';
     // Server-side fallback if a safety classifier declines (only models that support it)
     const canFallback = /^claude-(sonnet-5-5|opus-5|fable-5)/.test(model);
@@ -654,24 +782,35 @@ Weise darauf hin, wenn ein Wert wahrscheinlich ein Messfehler ist (z. B. Hände 
       max_tokens: 16000,
       output_config: { effort: 'medium' },
       stream: true,
-      messages: [{ role: 'user', content }],
+      messages: chat.msgs.map((m) => ({ role: m.role, content: m.content || m.text })),
     };
     if (canFallback) body.fallbacks = 'default';
-    await streamAI(headers, body, out);
+    let text = '', err = null;
+    try { text = await streamAI(headers, body, el); } catch (e) { err = e; text = e.partial || ''; }
+    if (chat.session !== session) return false; // user switched session meanwhile
+    if (text) { chat.msgs.push({ role: 'assistant', text }); ok = true; }
+    else chat.msgs = before; // nothing came back → drop the unanswered question (restores the old chat)
+    saveChat();
+    if (err) { // keep what is on screen and show the error below it
+      el.querySelector('.spin')?.parentElement.remove();
+      el.insertAdjacentHTML('beforeend', `<p class="err">Fehler: ${esc(String(err.message || err))}</p>`);
+      out.style.display = '';
+    }
   } catch (e) {
-    out.querySelector('.spin')?.parentElement.remove();
+    console.error(e);
+    out.style.display = '';
     out.insertAdjacentHTML('beforeend', `<p class="err">Fehler: ${esc(String(e.message || e))}</p>`);
   } finally {
-    $('btnAI').disabled = false;
+    chat.busy = false; $('btnAI').disabled = $('chatSend').disabled = false;
+    if (chat.session !== state.session) { loadChat(); renderChat(); }
     if (!sess.running) { try { await wake?.release(); } catch {} wake = null; }
   }
+  return ok;
 }
 
-const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
-
 // Streaming (SSE) so long answers neither time out nor seem to hang; text appears as it is written.
+// Renders into `out`, returns the answer text. Thrown errors carry `.partial` (text received so far).
 async function streamAI(headers, body, out) {
-  keepAwake(); // display lock would kill the request on iOS
   const setStatus = (msg) => { out.innerHTML = `<div class="row"><div class="spin" style="flex:none"></div><div>${msg}</div></div>`; };
   setStatus('Claude schaut sich deine Schwünge an …');
   const resp = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers, body: JSON.stringify(body) });
@@ -706,13 +845,15 @@ async function streamAI(headers, body, out) {
     }
   } catch (e) {
     if (gotText) render();
-    throw new Error(`Verbindung abgebrochen (${e.message || e}). ${gotText ? 'Teilantwort oben.' : ''} App beim Warten bitte im Vordergrund lassen.`);
+    const err = new Error(`Verbindung abgebrochen (${e.message || e}). ${gotText ? 'Teilantwort oben.' : ''} App beim Warten bitte im Vordergrund lassen.`);
+    err.partial = text; throw err;
   }
-  if (!gotText && stop !== 'refusal') out.innerHTML = '';
+  if (!gotText) out.innerHTML = '';
   if (stop === 'max_tokens') out.insertAdjacentHTML('beforeend', '<p class="err">Antwort wurde wegen Längenlimit abgeschnitten.</p>');
   else if (stop === 'refusal') out.insertAdjacentHTML('beforeend', '<p class="err">Claude hat die Anfrage abgelehnt (Sicherheitsfilter). Bitte nochmal versuchen.</p>');
   else if (!stop) out.insertAdjacentHTML('beforeend', '<p class="err">Stream endete unerwartet – Antwort evtl. unvollständig.</p>');
   else if (!gotText) out.innerHTML = '<p class="err">Leere Antwort erhalten.</p>';
+  return text;
 }
 
 function md(t) {
@@ -731,18 +872,33 @@ function md(t) {
 
 // ---------- wiring ----------
 $('btnStart').onclick = startSession;
-$('btnStop').onclick = () => { stopSession(); show('home'); updateCount(); };
+$('btnStop').onclick = () => {
+  // ✕ = cancel this recording: swings captured since the camera was started can be discarded
+  const ids = new Set(sess.runIds || []);
+  if (ids.size && confirm(`${ids.size} ${ids.size === 1 ? 'neuen Schwung' : 'neue Schwünge'} dieser Aufnahme verwerfen?\n\nOK = verwerfen · Abbrechen = behalten`)) {
+    dbDel([...ids]);
+    state.all = state.all.filter((s) => !ids.has(s.id)); refreshView();
+  }
+  stopSession(); show('home'); updateCount();
+};
 $('btnAnalyze').onclick = () => { stopSession(); openResults(); };
 $('btnResults').onclick = openResults;
 $('resBack').onclick = () => show('home');
 $('resCam').onclick = startSession;
 $('detBack').onclick = () => { player.playing = false; openResults(); };
 $('btnAI').onclick = runAI;
-$('sessSel').onchange = (e) => { state.session = e.target.value; refreshView(); updateCount(); openResults(); };
+$('chatSend').onclick = sendChat;
+$('btnExport').onclick = shareExport;
+$('btnCopy').onclick = copyMetrics;
+$('sessSel').onchange = (e) => { state.session = e.target.value; state.picked.clear(); refreshView(); updateCount(); openResults(); };
 $('sessDel').onclick = () => {
-  if (!confirm(`Alle ${state.swings.length} Schwünge vom ${sessLabel(state.session)} löschen?`)) return;
-  dbDel(state.swings.map((s) => s.id));
-  state.all = state.all.filter((s) => s.session !== state.session); refreshView();
+  const pick = state.scope === 'pick';
+  const del = pick ? scoped() : state.swings;
+  if (!del.length) return alert('Keine Schwünge ausgewählt.');
+  if (!confirm(pick ? `${del.length} ${del.length === 1 ? "ausgewählten Schwung" : "ausgewählte Schwünge"} löschen?` : `Alle ${del.length} Schwünge vom ${sessLabel(state.session)} löschen (inkl. KI-Chat)?`)) return;
+  dbDel(del.map((s) => s.id));
+  state.all = state.all.filter((s) => !del.includes(s)); state.picked.clear(); refreshView();
+  if (!pick) { loadChat(); chat.msgs = []; saveChat(); }
   updateCount(); openResults();
 };
 $('btnImport').onclick = () => $('fileImport').click();
@@ -753,5 +909,5 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 loadStored();
 
 // expose for testing
-window.__swing = { state, sess, importVideo, openResults, runAI, buildSwing, analyzeSwing, updateCount, addSwing, setRef, removeSwing, startEncoder, encodeFrame, encoderBlobs, openDetail };
+window.__swing = { chat, scoped, exportData, metricsCsv, state, sess, importVideo, openResults, runAI, buildSwing, analyzeSwing, updateCount, addSwing, setRef, removeSwing, startEncoder, encodeFrame, encoderBlobs, openDetail };
 void L;
